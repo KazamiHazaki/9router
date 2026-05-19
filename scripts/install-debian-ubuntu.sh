@@ -78,7 +78,9 @@ build_app() {
 install_cli_global() {
   log "Installing 9router CLI globally..."
   cd "${INSTALL_DIR}/cli"
-  sudo npm install -g .
+  local npm_bin
+  npm_bin="$(command -v npm)"
+  sudo env "PATH=$PATH" "${npm_bin}" install -g .
   log "9router version: $(9router --version)"
 }
 
