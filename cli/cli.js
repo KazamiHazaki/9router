@@ -74,6 +74,9 @@ let noBrowser = false;
 let skipUpdate = false;
 let showLog = false;
 let trayMode = false;
+let systemdRunMode = false;
+let installSystemd = false;
+let uninstallSystemd = false;
 
 for (let i = 0; i < args.length; i++) {
   if (args[i] === "--port" || args[i] === "-p") {
@@ -91,6 +94,14 @@ for (let i = 0; i < args.length; i++) {
   } else if (args[i] === "--tray" || args[i] === "-t") {
     trayMode = true;
     process.env.TRAY_MODE = "1";
+  } else if (args[i] === "--systemd-run") {
+    systemdRunMode = true;
+    noBrowser = true;
+    showLog = true;
+  } else if (args[i] === "--install-systemd") {
+    installSystemd = true;
+  } else if (args[i] === "--uninstall-systemd") {
+    uninstallSystemd = true;
   } else if (args[i] === "--help" || args[i] === "-h") {
     console.log(`
 Usage: ${APP_NAME} [options]
@@ -101,6 +112,9 @@ Options:
   -n, --no-browser    Don't open browser automatically
   -l, --log           Show server logs (default: hidden)
   -t, --tray          Run in system tray mode (background)
+  --install-systemd   Install and start 9Router as systemd service (Linux)
+  --uninstall-systemd Remove 9Router systemd service (Linux)
+  --systemd-run       Internal: run headless under systemd
   --skip-update       Skip auto-update check
   -h, --help          Show this help message
   -v, --version       Show version
@@ -112,8 +126,96 @@ Options:
   }
 }
 
+function runPrivilegedShell(command, input = null) {
+  if (process.getuid && process.getuid() === 0) {
+    execSync(command, { input, stdio: input ? ["pipe", "inherit", "inherit"] : "inherit", shell: true });
+    return;
+  }
+  execSync(`sudo sh -c ${JSON.stringify(command)}`, { input, stdio: input ? ["pipe", "inherit", "inherit"] : "inherit", shell: true });
+}
+
+function installSystemdService() {
+  if (process.platform !== "linux") {
+    console.error("Error: systemd service is only supported on Linux.");
+    process.exit(1);
+  }
+
+  const serviceName = "9router.service";
+  const logFile = "/var/log/9router.log";
+  const errLogFile = "/var/log/9router.error.log";
+  const execArgs = [
+    process.execPath,
+    __filename,
+    "--systemd-run",
+    "--skip-update",
+    "--no-browser",
+    "--log",
+    "--port",
+    String(port),
+    "--host",
+    host,
+  ];
+  const quote = (v) => `"${String(v).replace(/"/g, '\\"')}"`;
+  const execStart = execArgs.map(quote).join(" ");
+  const service = `[Unit]
+Description=9Router AI Router
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=${__dirname}
+ExecStart=${execStart}
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=20
+Environment=NODE_ENV=production
+StandardOutput=append:${logFile}
+StandardError=append:${errLogFile}
+
+[Install]
+WantedBy=multi-user.target
+`;
+
+  try {
+    runPrivilegedShell(`install -m 0644 /dev/stdin /etc/systemd/system/${serviceName}`, service);
+    runPrivilegedShell(`touch ${logFile} ${errLogFile} && chmod 0644 ${logFile} ${errLogFile}`);
+    runPrivilegedShell("systemctl daemon-reload");
+    runPrivilegedShell(`systemctl enable --now ${serviceName}`);
+    console.log(`✅ Installed ${serviceName}`);
+    console.log(`Logs: ${logFile}`);
+    console.log(`Errors: ${errLogFile}`);
+    console.log(`Status: systemctl status ${serviceName}`);
+  } catch (err) {
+    console.error("Failed to install systemd service:", err.message);
+    process.exit(1);
+  }
+  process.exit(0);
+}
+
+function uninstallSystemdService() {
+  if (process.platform !== "linux") {
+    console.error("Error: systemd service is only supported on Linux.");
+    process.exit(1);
+  }
+  try {
+    runPrivilegedShell("systemctl disable --now 9router.service || true");
+    runPrivilegedShell("rm -f /etc/systemd/system/9router.service");
+    runPrivilegedShell("systemctl daemon-reload");
+    console.log("✅ Removed 9router.service");
+  } catch (err) {
+    console.error("Failed to remove systemd service:", err.message);
+    process.exit(1);
+  }
+  process.exit(0);
+}
+
+if (installSystemd) installSystemdService();
+if (uninstallSystemd) uninstallSystemdService();
+
 // Auto-relaunch after update: detached process has no TTY → fallback to tray
-if (skipUpdate && !trayMode && !process.stdin.isTTY) {
+if (skipUpdate && !trayMode && !systemdRunMode && !process.stdin.isTTY) {
   trayMode = true;
   process.env.TRAY_MODE = "1";
 }
@@ -553,7 +655,7 @@ function startServer(latestVersion) {
     const child = spawn(RUNTIME, ["--max-old-space-size=6144", serverPath], {
       cwd: standaloneDir,
       stdio: showLog ? "inherit" : ["ignore", "ignore", "pipe"],
-      detached: true,
+      detached: !systemdRunMode,
       windowsHide: true,
       env: {
         ...buildEnvWithRuntime(process.env),
@@ -643,6 +745,14 @@ function startServer(latestVersion) {
       // Tray not available - continue without it
     }
   };
+
+  // systemd mode: no TUI, keep foreground process alive so systemd can supervise/restart/log.
+  if (systemdRunMode) {
+    console.log(`\n🚀 ${pkg.name} v${pkg.version}`);
+    console.log(`Server: http://${displayHost}:${port}`);
+    console.log("Mode: systemd");
+    return;
+  }
 
   // Tray-only mode: no TUI, just tray icon
   if (trayMode) {
