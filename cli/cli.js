@@ -135,14 +135,18 @@ function runPrivilegedShell(command, input = null) {
 }
 
 function installSystemdService() {
-  if (process.platform !== "linux") {
+  const serviceDir = process.env["9ROUTER_SYSTEMD_DIR"] || "/etc/systemd/system";
+  const logDir = process.env["9ROUTER_LOG_DIR"] || "/var/log";
+  const localInstall = !!process.env["9ROUTER_SYSTEMD_DIR"];
+  if (process.platform !== "linux" && !localInstall) {
     console.error("Error: systemd service is only supported on Linux.");
     process.exit(1);
   }
 
   const serviceName = "9router.service";
-  const logFile = "/var/log/9router.log";
-  const errLogFile = "/var/log/9router.error.log";
+  const servicePath = path.join(serviceDir, serviceName);
+  const logFile = path.join(logDir, "9router.log");
+  const errLogFile = path.join(logDir, "9router.error.log");
   const execArgs = [
     process.execPath,
     __filename,
@@ -179,14 +183,31 @@ WantedBy=multi-user.target
 `;
 
   try {
-    runPrivilegedShell(`install -m 0644 /dev/stdin /etc/systemd/system/${serviceName}`, service);
-    runPrivilegedShell(`touch ${logFile} ${errLogFile} && chmod 0644 ${logFile} ${errLogFile}`);
-    runPrivilegedShell("systemctl daemon-reload");
-    runPrivilegedShell(`systemctl enable --now ${serviceName}`);
-    console.log(`✅ Installed ${serviceName}`);
+    if (localInstall) {
+      fs.mkdirSync(serviceDir, { recursive: true });
+      fs.mkdirSync(logDir, { recursive: true });
+      fs.writeFileSync(servicePath, service);
+      fs.chmodSync(servicePath, 0o644);
+      fs.closeSync(fs.openSync(logFile, "a"));
+      fs.closeSync(fs.openSync(errLogFile, "a"));
+      console.log(`✅ Generated ${servicePath}`);
+    } else {
+      const tmpService = path.join(os.tmpdir(), `${serviceName}.${process.pid}`);
+      fs.writeFileSync(tmpService, service);
+      fs.chmodSync(tmpService, 0o644);
+      try {
+        runPrivilegedShell(`install -m 0644 ${tmpService} ${servicePath}`);
+      } finally {
+        try { fs.unlinkSync(tmpService); } catch { }
+      }
+      runPrivilegedShell(`touch ${logFile} ${errLogFile} && chmod 0644 ${logFile} ${errLogFile}`);
+      runPrivilegedShell("systemctl daemon-reload");
+      runPrivilegedShell(`systemctl enable --now ${serviceName}`);
+      console.log(`✅ Installed ${serviceName}`);
+    }
     console.log(`Logs: ${logFile}`);
     console.log(`Errors: ${errLogFile}`);
-    console.log(`Status: systemctl status ${serviceName}`);
+    if (!localInstall) console.log(`Status: systemctl status ${serviceName}`);
   } catch (err) {
     console.error("Failed to install systemd service:", err.message);
     process.exit(1);
@@ -195,14 +216,20 @@ WantedBy=multi-user.target
 }
 
 function uninstallSystemdService() {
-  if (process.platform !== "linux") {
+  const serviceDir = process.env["9ROUTER_SYSTEMD_DIR"] || "/etc/systemd/system";
+  const localInstall = !!process.env["9ROUTER_SYSTEMD_DIR"];
+  if (process.platform !== "linux" && !localInstall) {
     console.error("Error: systemd service is only supported on Linux.");
     process.exit(1);
   }
   try {
-    runPrivilegedShell("systemctl disable --now 9router.service || true");
-    runPrivilegedShell("rm -f /etc/systemd/system/9router.service");
-    runPrivilegedShell("systemctl daemon-reload");
+    if (localInstall) {
+      fs.rmSync(path.join(serviceDir, "9router.service"), { force: true });
+    } else {
+      runPrivilegedShell("systemctl disable --now 9router.service || true");
+      runPrivilegedShell("rm -f /etc/systemd/system/9router.service");
+      runPrivilegedShell("systemctl daemon-reload");
+    }
     console.log("✅ Removed 9router.service");
   } catch (err) {
     console.error("Failed to remove systemd service:", err.message);
