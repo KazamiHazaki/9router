@@ -137,20 +137,45 @@ console.log("3️⃣  Copying Next.js standalone build to app/cli/app...");
 const standaloneRoot = path.join(appDir, ".next", "standalone");
 const standaloneRootResolved = path.join(buildDistDir, "standalone");
 const standaloneRootToUse = fs.existsSync(standaloneRootResolved) ? standaloneRootResolved : standaloneRoot;
-const standaloneApp = fs.existsSync(path.join(standaloneRootToUse, "server.js"))
-  ? standaloneRootToUse
-  : path.join(standaloneRootToUse, "app");
-if (!fs.existsSync(standaloneApp)) {
-  console.error("❌ Next.js standalone build not found under .next/standalone");
-  console.error("Expected either .next/standalone/server.js or .next/standalone/app/");
+
+function findStandaloneApp(root, maxDepth = 4) {
+  if (fs.existsSync(path.join(root, "server.js"))) return root;
+  const legacyApp = path.join(root, "app");
+  if (fs.existsSync(path.join(legacyApp, "server.js"))) return legacyApp;
+
+  const queue = [{ dir: root, depth: 0 }];
+  while (queue.length) {
+    const { dir, depth } = queue.shift();
+    if (fs.existsSync(path.join(dir, "server.js"))) return dir;
+    if (depth >= maxDepth || !fs.existsSync(dir)) continue;
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      if (entry.name === "node_modules" || entry.name.startsWith(".")) continue;
+      queue.push({ dir: path.join(dir, entry.name), depth: depth + 1 });
+    }
+  }
+  return null;
+}
+
+const standaloneApp = findStandaloneApp(standaloneRootToUse);
+if (!standaloneApp) {
+  console.error(`❌ Next.js standalone build not found under ${standaloneRootToUse}`);
+  console.error("Expected server.js at standalone root or nested project folder.");
   process.exit(1);
 }
 copyRecursive(standaloneApp, cliAppDir);
 
-// Older nested-app layout stores traced node_modules at standalone root.
-const standaloneNodeModules = path.join(standaloneRootToUse, "node_modules");
-if (standaloneApp !== standaloneRootToUse && fs.existsSync(standaloneNodeModules)) {
-  copyRecursive(standaloneNodeModules, path.join(cliAppDir, "node_modules"));
+// Nested standalone layout stores traced node_modules at or above project folder.
+let nodeModulesRoot = standaloneApp;
+while (nodeModulesRoot.startsWith(standaloneRootToUse)) {
+  const candidate = path.join(nodeModulesRoot, "node_modules");
+  if (fs.existsSync(candidate)) {
+    copyRecursive(candidate, path.join(cliAppDir, "node_modules"));
+    break;
+  }
+  const parent = path.dirname(nodeModulesRoot);
+  if (parent === nodeModulesRoot) break;
+  nodeModulesRoot = parent;
 }
 console.log("✅ Copied standalone build\n");
 
